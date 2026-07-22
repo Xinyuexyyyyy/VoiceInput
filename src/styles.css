@@ -1,0 +1,21 @@
+:root {
+  font-family: "Segoe UI", sans-serif;
+  color: #17212b;
+  background: #f7f9fb;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+}
+
+h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}

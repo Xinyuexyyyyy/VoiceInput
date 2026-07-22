@@ -1,0 +1,21 @@
+# Local credentials. Never add real values to source control.
+.env.local
+.env.*.local
+credentials.local.*
+
+# Build output.
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+target/
+
+# Runtime diagnostics. The spike does not write transcript logs.
+*.log
+logs/
+
+# Editor and operating-system files.
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
