@@ -11,7 +11,8 @@ approach from OpenLess.
 - License: MIT
 
 The OpenLess MIT license permits this adaptation. VoiceInput retains this
-attribution and ships under the MIT License in `LICENSE`.
+attribution and ships the original OpenLess copyright and MIT license text in
+`licenses/OpenLess-LICENSE`. VoiceInput's own MIT license remains in `LICENSE`.
 
 VoiceInput intentionally does not include OpenLess polish, history, analytics,
 translation, local-model, multi-provider, or cross-platform code.

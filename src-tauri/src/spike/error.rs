@@ -6,6 +6,7 @@ pub enum ErrorClass {
     RateLimit,
     Network,
     Microphone,
+    AudioBackpressure,
     Protocol,
     NoFinal,
     FinalTimeout,
@@ -18,6 +19,7 @@ impl ErrorClass {
             Self::RateLimit => "rate_limit",
             Self::Network => "network",
             Self::Microphone => "microphone",
+            Self::AudioBackpressure => "audio_backpressure",
             Self::Protocol => "protocol",
             Self::NoFinal => "no_final",
             Self::FinalTimeout => "final_timeout",
@@ -39,6 +41,8 @@ pub enum SpikeError {
     MicrophoneUnavailable,
     #[error("麦克风采集失败")]
     MicrophoneFailed,
+    #[error("音频队列背压溢出")]
+    AudioBackpressure,
     #[error("服务端协议帧无效")]
     Protocol,
     #[error("服务端未返回最终结果")]
@@ -58,6 +62,7 @@ impl SpikeError {
             Self::RateLimited(_) => ErrorClass::RateLimit,
             Self::Network => ErrorClass::Network,
             Self::MicrophoneUnavailable | Self::MicrophoneFailed => ErrorClass::Microphone,
+            Self::AudioBackpressure => ErrorClass::AudioBackpressure,
             Self::Protocol | Self::ServerError(_) | Self::InvalidArguments => ErrorClass::Protocol,
             Self::NoFinalResult => ErrorClass::NoFinal,
             Self::FinalResultTimeout => ErrorClass::FinalTimeout,

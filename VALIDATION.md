@@ -1,6 +1,6 @@
 # Slice 0/1 验证记录
 
-日期：2026-07-22
+日期：2026-07-23
 
 ## 已完成的静态验证
 
@@ -9,11 +9,20 @@
 | `npm run check` | 通过 |
 | `npm run build` | 通过 |
 | `cargo fmt --check` | 通过 |
-| `cargo test` | 6/6 通过 |
-| `cargo check` | 通过 |
+| `cargo test --locked` | 9/9 通过 |
+| `cargo check --locked` | 通过 |
+| `cargo +1.88.0 check --locked` | 通过 |
 | `.env.local` Git 忽略规则 | 通过 |
 | 构建产物 Git 忽略规则 | 通过 |
 | 未配置凭据失败路径 | 通过，分类为 `credentials`；未启动麦克风或网络会话 |
+
+## 审查修复
+
+- 热词字段已改为 `request.corpus.context`，并验证不存在旧的 `request.context`。
+- WebSocket 每次写入有 5 秒 deadline；结束阶段的排空与末帧共享 5 秒总 deadline，超时归类为 `network`。
+- 音频与服务端帧通道改为有界；音频回调队列满时立即报告 `audio_backpressure`，不静默丢帧。
+- CPAL 异步设备失败会通知主循环立即停止；48 kHz 等降采样路径在重采样前经过跨 callback 保持状态的低通 FIR。
+- `licenses/OpenLess-LICENSE` 包含 OpenLess 原始 MIT 版权与许可文本；MSRV 已提升并实测为 Rust 1.88，Windows CI 会同时验证 Rust 1.88 与 stable。
 
 ## Gate A：真实旧版凭据
 

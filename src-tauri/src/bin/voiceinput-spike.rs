@@ -1,13 +1,16 @@
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use voiceinput_lib::spike::{
     connect, parse_server_frame, Credentials, RecognitionEvent, Recorder, SafeEvent, ServerMessage,
     SpikeError, SpikePhase,
 };
 
 const FINAL_TIMEOUT: Duration = Duration::from_secs(12);
+const AUDIO_QUEUE_CAPACITY: usize = 64;
+const FINALIZE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[tokio::main]
 async fn main() {
@@ -47,8 +50,9 @@ async fn run() -> Result<(), SpikeError> {
     }
     .write_to_stderr();
     let (mut session, mut server_rx) = connect(credentials, &hotwords).await?;
-    let (audio_tx, mut audio_rx) = mpsc::unbounded_channel();
+    let (audio_tx, mut audio_rx) = mpsc::channel(AUDIO_QUEUE_CAPACITY);
     let recorder = Recorder::start_default(audio_tx)?;
+    let mut recorder_failure = recorder.failure_receiver();
     SafeEvent {
         phase: SpikePhase::Listening,
         elapsed_ms: started.elapsed().as_millis(),
@@ -68,14 +72,20 @@ async fn run() -> Result<(), SpikeError> {
             }
             Some(pcm) = audio_rx.recv() => session.send_audio(&pcm).await?,
             message = server_rx.recv() => receive_during_recording(message, &mut partial)?,
+            changed = recorder_failure.changed() => {
+                changed.map_err(|_| SpikeError::MicrophoneFailed)?;
+                let failure = (*recorder_failure.borrow()).ok_or(SpikeError::MicrophoneFailed)?;
+                return Err(failure.into_error());
+            }
         }
     }
 
     recorder.stop()?;
+    let finalize_deadline = Instant::now() + FINALIZE_DRAIN_TIMEOUT;
     while let Ok(pcm) = audio_rx.try_recv() {
-        session.send_audio(&pcm).await?;
+        session.send_audio_until(&pcm, finalize_deadline).await?;
     }
-    session.send_last_frame().await?;
+    session.send_last_frame_until(finalize_deadline).await?;
     SafeEvent {
         phase: SpikePhase::Finalizing,
         elapsed_ms: started.elapsed().as_millis(),
@@ -119,7 +129,7 @@ fn receive_during_recording(
 }
 
 async fn await_final(
-    server_rx: &mut mpsc::UnboundedReceiver<ServerMessage>,
+    server_rx: &mut mpsc::Receiver<ServerMessage>,
     partial: &mut Option<String>,
 ) -> Result<String, SpikeError> {
     while let Some(message) = server_rx.recv().await {

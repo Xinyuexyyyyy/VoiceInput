@@ -6,10 +6,11 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::HeaderValue;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
@@ -24,6 +25,9 @@ const ENDPOINT: &str = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_asyn
 const PCM_PACKET_BYTES: usize = 6_400;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_ATTEMPTS: usize = 3;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const FINALIZE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const SERVER_QUEUE_CAPACITY: usize = 32;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Writer = futures_util::stream::SplitSink<Ws, Message>;
@@ -49,27 +53,27 @@ pub struct Session {
 pub async fn connect(
     credentials: Credentials,
     hotwords: &[String],
-) -> Result<(Session, mpsc::UnboundedReceiver<ServerMessage>), SpikeError> {
+) -> Result<(Session, mpsc::Receiver<ServerMessage>), SpikeError> {
     let connect_id = Uuid::new_v4().to_string();
     let websocket = connect_with_retry(&credentials, &connect_id).await?;
     let (writer, mut reader) = websocket.split();
-    let (server_tx, server_rx) = mpsc::unbounded_channel();
+    let (server_tx, server_rx) = mpsc::channel(SERVER_QUEUE_CAPACITY);
 
     tokio::spawn(async move {
         while let Some(message) = reader.next().await {
             match message {
                 Ok(Message::Binary(bytes)) => {
-                    if server_tx.send(ServerMessage::Frame(bytes)).is_err() {
+                    if server_tx.send(ServerMessage::Frame(bytes)).await.is_err() {
                         break;
                     }
                 }
                 Ok(Message::Close(_)) => {
-                    let _ = server_tx.send(ServerMessage::Closed);
+                    let _ = server_tx.send(ServerMessage::Closed).await;
                     break;
                 }
                 Ok(_) => {}
                 Err(_) => {
-                    let _ = server_tx.send(ServerMessage::NetworkFailed);
+                    let _ = server_tx.send(ServerMessage::NetworkFailed).await;
                     break;
                 }
             }
@@ -88,28 +92,55 @@ pub async fn connect(
 
 impl Session {
     pub async fn send_audio(&mut self, pcm: &[u8]) -> Result<(), SpikeError> {
+        self.send_audio_with_deadline(pcm, None).await
+    }
+
+    pub async fn send_audio_until(
+        &mut self,
+        pcm: &[u8],
+        deadline: Instant,
+    ) -> Result<(), SpikeError> {
+        self.send_audio_with_deadline(pcm, Some(deadline)).await
+    }
+
+    async fn send_audio_with_deadline(
+        &mut self,
+        pcm: &[u8],
+        deadline: Option<Instant>,
+    ) -> Result<(), SpikeError> {
         self.pending_audio.extend_from_slice(pcm);
         while self.pending_audio.len() >= PCM_PACKET_BYTES {
             let packet: Vec<u8> = self.pending_audio.drain(..PCM_PACKET_BYTES).collect();
-            self.send_audio_packet(packet).await?;
+            match deadline {
+                Some(deadline) => self.send_audio_packet_until(packet, deadline).await?,
+                None => self.send_audio_packet(packet).await?,
+            }
         }
         Ok(())
     }
 
     pub async fn send_last_frame(&mut self) -> Result<(), SpikeError> {
+        self.send_last_frame_until(Instant::now() + FINALIZE_WRITE_TIMEOUT)
+            .await
+    }
+
+    pub async fn send_last_frame_until(&mut self, deadline: Instant) -> Result<(), SpikeError> {
         if !self.pending_audio.is_empty() {
             let packet = std::mem::take(&mut self.pending_audio);
-            self.send_audio_packet(packet).await?;
+            self.send_audio_packet_until(packet, deadline).await?;
         }
         let final_sequence = -self.next_sequence;
         self.next_sequence += 1;
-        self.send_frame(frame::build(
-            MessageType::AudioOnlyRequest,
-            Flags::NegativeSequence,
-            Serialization::None,
-            &[],
-            Some(final_sequence),
-        ))
+        self.send_frame_until(
+            frame::build(
+                MessageType::AudioOnlyRequest,
+                Flags::NegativeSequence,
+                Serialization::None,
+                &[],
+                Some(final_sequence),
+            ),
+            deadline,
+        )
         .await
     }
 
@@ -118,27 +149,7 @@ impl Session {
         connect_id: &str,
         hotwords: &[String],
     ) -> Result<(), SpikeError> {
-        let mut request = json!({
-            "model_name": "bigmodel",
-            "enable_itn": true,
-            "enable_punc": true,
-            "show_utterances": true,
-            "enable_nonstream": true
-        });
-        if let Some(context) = hotword_context(hotwords) {
-            request["context"] = Value::String(context);
-        }
-        let payload = json!({
-            "user": { "uid": connect_id },
-            "audio": {
-                "format": "pcm",
-                "rate": 16000,
-                "bits": 16,
-                "channel": 1,
-                "codec": "raw"
-            },
-            "request": request
-        });
+        let payload = initial_request_payload(connect_id, hotwords);
         let payload = serde_json::to_vec(&payload).map_err(|_| SpikeError::Protocol)?;
         let sequence = self.next_sequence;
         self.next_sequence += 1;
@@ -153,25 +164,110 @@ impl Session {
     }
 
     async fn send_audio_packet(&mut self, packet: Vec<u8>) -> Result<(), SpikeError> {
+        self.send_audio_packet_with_timeout(packet, WRITE_TIMEOUT)
+            .await
+    }
+
+    async fn send_audio_packet_until(
+        &mut self,
+        packet: Vec<u8>,
+        deadline: Instant,
+    ) -> Result<(), SpikeError> {
+        self.send_audio_packet_with_timeout(packet, remaining_until(deadline)?)
+            .await
+    }
+
+    async fn send_audio_packet_with_timeout(
+        &mut self,
+        packet: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(), SpikeError> {
         let sequence = self.next_sequence;
         self.next_sequence += 1;
+        self.send_frame_with_timeout(
+            frame::build(
+                MessageType::AudioOnlyRequest,
+                Flags::PositiveSequence,
+                Serialization::None,
+                &packet,
+                Some(sequence),
+            ),
+            timeout,
+        )
+        .await?;
         self.audio_frames += 1;
-        self.send_frame(frame::build(
-            MessageType::AudioOnlyRequest,
-            Flags::PositiveSequence,
-            Serialization::None,
-            &packet,
-            Some(sequence),
-        ))
-        .await
+        Ok(())
     }
 
     async fn send_frame(&mut self, bytes: Vec<u8>) -> Result<(), SpikeError> {
-        self.writer
-            .send(Message::Binary(bytes))
-            .await
-            .map_err(|_| SpikeError::Network)
+        self.send_frame_with_timeout(bytes, WRITE_TIMEOUT).await
     }
+
+    async fn send_frame_until(
+        &mut self,
+        bytes: Vec<u8>,
+        deadline: Instant,
+    ) -> Result<(), SpikeError> {
+        self.send_frame_with_timeout(bytes, remaining_until(deadline)?)
+            .await
+    }
+
+    async fn send_frame_with_timeout(
+        &mut self,
+        bytes: Vec<u8>,
+        timeout: Duration,
+    ) -> Result<(), SpikeError> {
+        send_with_timeout(&mut self.writer, Message::Binary(bytes), timeout).await
+    }
+}
+
+async fn send_with_timeout<S>(
+    sink: &mut S,
+    message: Message,
+    timeout: Duration,
+) -> Result<(), SpikeError>
+where
+    S: Sink<Message> + Unpin,
+{
+    if timeout.is_zero() {
+        return Err(SpikeError::Network);
+    }
+    match tokio::time::timeout(timeout, sink.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) | Err(_) => Err(SpikeError::Network),
+    }
+}
+
+fn remaining_until(deadline: Instant) -> Result<Duration, SpikeError> {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(SpikeError::Network);
+    }
+    Ok(remaining)
+}
+
+fn initial_request_payload(connect_id: &str, hotwords: &[String]) -> Value {
+    let mut request = json!({
+        "model_name": "bigmodel",
+        "enable_itn": true,
+        "enable_punc": true,
+        "show_utterances": true,
+        "enable_nonstream": true
+    });
+    if let Some(context) = hotword_context(hotwords) {
+        request["corpus"] = json!({ "context": context });
+    }
+    json!({
+        "user": { "uid": connect_id },
+        "audio": {
+            "format": "pcm",
+            "rate": 16000,
+            "bits": 16,
+            "channel": 1,
+            "codec": "raw"
+        },
+        "request": request
+    })
 }
 
 pub fn parse_server_frame(bytes: &[u8]) -> Result<Option<RecognitionEvent>, SpikeError> {
@@ -293,17 +389,33 @@ mod tests {
     }
 
     #[test]
-    fn request_uses_required_dual_pass_options() {
-        let mut request = json!({
-            "model_name": "bigmodel",
-            "enable_itn": true,
-            "enable_punc": true,
-            "show_utterances": true,
-            "enable_nonstream": true
+    fn request_uses_corpus_context_and_required_dual_pass_options() {
+        let payload = initial_request_payload("test-user", &["area".to_owned()]);
+        assert_eq!(payload["request"]["enable_nonstream"], true);
+        assert!(payload.pointer("/request/context").is_none());
+        let context = payload
+            .pointer("/request/corpus/context")
+            .and_then(Value::as_str)
+            .expect("context exists under request.corpus");
+        let parsed: Value = serde_json::from_str(context).expect("context is JSON");
+        assert_eq!(parsed["hotwords"][0]["word"], "area");
+    }
+
+    #[tokio::test]
+    async fn write_timeout_is_a_network_error() {
+        use std::convert::Infallible;
+
+        let mut pending_sink = futures_util::sink::unfold((), |_, _: Message| {
+            futures_util::future::pending::<Result<(), Infallible>>()
         });
-        request["context"] = Value::String(hotword_context(&["area".to_owned()]).unwrap());
-        assert_eq!(request["enable_nonstream"], true);
-        assert!(request["context"].as_str().unwrap().contains("area"));
+        let error = send_with_timeout(
+            &mut pending_sink,
+            Message::Binary(Vec::new()),
+            Duration::from_millis(1),
+        )
+        .await
+        .expect_err("pending writer must time out");
+        assert!(matches!(error, SpikeError::Network));
     }
 
     #[test]
