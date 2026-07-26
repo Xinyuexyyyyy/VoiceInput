@@ -27,11 +27,10 @@ impl MessageType {
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Flags {
-    #[allow(dead_code)]
     None = 0,
-    PositiveSequence = 1,
+    HasSequence = 1,
     LastPacket = 2,
-    NegativeSequence = 3,
+    LastPacketWithSequence = 3,
 }
 
 #[repr(u8)]
@@ -44,16 +43,13 @@ pub enum Serialization {
 pub struct ParsedFrame {
     pub message_type: Option<MessageType>,
     pub flags: u8,
-    pub sequence: Option<i32>,
     pub error_code: Option<u32>,
     pub payload: Vec<u8>,
 }
 
 impl ParsedFrame {
     pub fn is_final(&self) -> bool {
-        self.flags == Flags::LastPacket as u8
-            || self.flags == Flags::NegativeSequence as u8
-            || self.sequence.is_some_and(|sequence| sequence < 0)
+        self.flags == Flags::LastPacketWithSequence as u8
     }
 }
 
@@ -70,7 +66,7 @@ pub fn build(
     result.push((serialization as u8) << 4 | COMPRESSION_NONE);
     result.push(0);
 
-    if matches!(flags, Flags::PositiveSequence | Flags::NegativeSequence) {
+    if matches!(flags, Flags::HasSequence | Flags::LastPacketWithSequence) {
         result.extend_from_slice(&sequence.unwrap_or_default().to_be_bytes());
     }
 
@@ -91,13 +87,10 @@ pub fn parse(data: &[u8]) -> Option<ParsedFrame> {
     let message_type = MessageType::from_raw(data[1] >> 4);
     let flags = data[1] & 0x0f;
     let mut offset = header_size;
-    let sequence = if matches!(flags, 1 | 3) {
-        let sequence = read_i32(data, offset)?;
+    if matches!(flags, 1 | 3) {
+        read_i32(data, offset)?;
         offset += 4;
-        Some(sequence)
-    } else {
-        None
-    };
+    }
 
     if message_type == Some(MessageType::ErrorMessage) {
         let error_code = read_u32(data, offset)?;
@@ -106,7 +99,6 @@ pub fn parse(data: &[u8]) -> Option<ParsedFrame> {
         return data.get(offset..offset + size).map(|payload| ParsedFrame {
             message_type,
             flags,
-            sequence,
             error_code: Some(error_code),
             payload: payload.to_vec(),
         });
@@ -117,7 +109,6 @@ pub fn parse(data: &[u8]) -> Option<ParsedFrame> {
     data.get(offset..offset + size).map(|payload| ParsedFrame {
         message_type,
         flags,
-        sequence,
         error_code: None,
         payload: payload.to_vec(),
     })
@@ -138,17 +129,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_negative_sequence_as_final() {
+    fn only_last_response_flag_is_final() {
         let frame = build(
-            MessageType::AudioOnlyRequest,
-            Flags::NegativeSequence,
+            MessageType::FullServerResponse,
+            Flags::LastPacketWithSequence,
             Serialization::None,
             &[],
             Some(-3),
         );
         let parsed = parse(&frame).expect("frame parses");
         assert!(parsed.is_final());
-        assert_eq!(parsed.sequence, Some(-3));
+    }
+
+    #[test]
+    fn negative_sequence_value_without_last_flag_is_not_final() {
+        let frame = build(
+            MessageType::FullServerResponse,
+            Flags::HasSequence,
+            Serialization::Json,
+            b"{}",
+            Some(-3),
+        );
+        let parsed = parse(&frame).expect("frame parses");
+        assert!(!parsed.is_final());
     }
 
     #[test]

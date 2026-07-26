@@ -333,6 +333,23 @@ mod tests {
         assert!(high_rms < 0.08, "out-of-band signal should be attenuated");
     }
 
+    #[test]
+    fn resampling_preserves_clock_across_callback_boundaries() {
+        let input: Vec<f32> = (0..48_000)
+            .map(|index| (index as f32 / 48_000.0) * 2.0 - 1.0)
+            .collect();
+
+        let whole = PcmConverter::new(1, 48_000).convert(&input);
+        let mut chunked_converter = PcmConverter::new(1, 48_000);
+        let mut chunked = Vec::new();
+        for chunk in input.chunks(1_031) {
+            chunked.extend(chunked_converter.convert(chunk));
+        }
+
+        assert_eq!(whole.len() / 2, 16_000);
+        assert_eq!(chunked.len() / 2, whole.len() / 2);
+    }
+
     fn sine_wave(frequency_hz: f64) -> Vec<f32> {
         (0..48_000)
             .map(|index| (2.0 * PI * frequency_hz * index as f64 / 48_000.0).sin() as f32)

@@ -46,7 +46,6 @@ pub enum RecognitionEvent {
 pub struct Session {
     writer: Writer,
     pending_audio: Vec<u8>,
-    next_sequence: i32,
     pub audio_frames: usize,
 }
 
@@ -83,7 +82,6 @@ pub async fn connect(
     let mut session = Session {
         writer,
         pending_audio: Vec::new(),
-        next_sequence: 1,
         audio_frames: 0,
     };
     session.send_initial_request(&connect_id, hotwords).await?;
@@ -129,19 +127,7 @@ impl Session {
             let packet = std::mem::take(&mut self.pending_audio);
             self.send_audio_packet_until(packet, deadline).await?;
         }
-        let final_sequence = -self.next_sequence;
-        self.next_sequence += 1;
-        self.send_frame_until(
-            frame::build(
-                MessageType::AudioOnlyRequest,
-                Flags::NegativeSequence,
-                Serialization::None,
-                &[],
-                Some(final_sequence),
-            ),
-            deadline,
-        )
-        .await
+        self.send_frame_until(last_frame(), deadline).await
     }
 
     async fn send_initial_request(
@@ -149,18 +135,8 @@ impl Session {
         connect_id: &str,
         hotwords: &[String],
     ) -> Result<(), SpikeError> {
-        let payload = initial_request_payload(connect_id, hotwords);
-        let payload = serde_json::to_vec(&payload).map_err(|_| SpikeError::Protocol)?;
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
-        self.send_frame(frame::build(
-            MessageType::FullClientRequest,
-            Flags::PositiveSequence,
-            Serialization::Json,
-            &payload,
-            Some(sequence),
-        ))
-        .await
+        self.send_frame(initial_request_frame(connect_id, hotwords)?)
+            .await
     }
 
     async fn send_audio_packet(&mut self, packet: Vec<u8>) -> Result<(), SpikeError> {
@@ -182,19 +158,8 @@ impl Session {
         packet: Vec<u8>,
         timeout: Duration,
     ) -> Result<(), SpikeError> {
-        let sequence = self.next_sequence;
-        self.next_sequence += 1;
-        self.send_frame_with_timeout(
-            frame::build(
-                MessageType::AudioOnlyRequest,
-                Flags::PositiveSequence,
-                Serialization::None,
-                &packet,
-                Some(sequence),
-            ),
-            timeout,
-        )
-        .await?;
+        self.send_frame_with_timeout(audio_packet_frame(&packet), timeout)
+            .await?;
         self.audio_frames += 1;
         Ok(())
     }
@@ -219,6 +184,38 @@ impl Session {
     ) -> Result<(), SpikeError> {
         send_with_timeout(&mut self.writer, Message::Binary(bytes), timeout).await
     }
+}
+
+fn initial_request_frame(connect_id: &str, hotwords: &[String]) -> Result<Vec<u8>, SpikeError> {
+    let payload = initial_request_payload(connect_id, hotwords);
+    let payload = serde_json::to_vec(&payload).map_err(|_| SpikeError::Protocol)?;
+    Ok(frame::build(
+        MessageType::FullClientRequest,
+        Flags::None,
+        Serialization::Json,
+        &payload,
+        None,
+    ))
+}
+
+fn audio_packet_frame(packet: &[u8]) -> Vec<u8> {
+    frame::build(
+        MessageType::AudioOnlyRequest,
+        Flags::None,
+        Serialization::None,
+        packet,
+        None,
+    )
+}
+
+fn last_frame() -> Vec<u8> {
+    frame::build(
+        MessageType::AudioOnlyRequest,
+        Flags::LastPacket,
+        Serialization::None,
+        &[],
+        None,
+    )
 }
 
 async fn send_with_timeout<S>(
@@ -279,6 +276,12 @@ pub fn parse_server_frame(bytes: &[u8]) -> Result<Option<RecognitionEvent>, Spik
     }
     if parsed.message_type != Some(MessageType::FullServerResponse) {
         return Ok(None);
+    }
+    if !matches!(
+        parsed.flags,
+        flag if flag == Flags::HasSequence as u8 || flag == Flags::LastPacketWithSequence as u8
+    ) {
+        return Err(SpikeError::Protocol);
     }
     let value: Value = serde_json::from_slice(&parsed.payload).map_err(|_| SpikeError::Protocol)?;
     let Some(text) = result_text(&value) else {
@@ -423,12 +426,61 @@ mod tests {
         let payload = br#"{"result": {"text": "final-only"}}"#;
         let bytes = frame::build(
             MessageType::FullServerResponse,
-            Flags::NegativeSequence,
+            Flags::LastPacketWithSequence,
             Serialization::Json,
             payload,
             Some(-4),
         );
         let event = parse_server_frame(&bytes).unwrap().expect("event exists");
         assert!(matches!(event, RecognitionEvent::Final(text) if text == "final-only"));
+    }
+
+    #[test]
+    fn client_frames_use_documented_flags_without_sequence_data() {
+        let initial = initial_request_frame("test-user", &[]).expect("initial frame builds");
+        assert_eq!(initial[1], 0x10);
+        assert_eq!(
+            u32::from_be_bytes(initial[4..8].try_into().unwrap()) as usize,
+            initial.len() - 8
+        );
+
+        let audio = audio_packet_frame(&vec![0; PCM_PACKET_BYTES]);
+        assert_eq!(audio[1], 0x20);
+        assert_eq!(audio.len(), 8 + PCM_PACKET_BYTES);
+        assert_eq!(
+            u32::from_be_bytes(audio[4..8].try_into().unwrap()),
+            PCM_PACKET_BYTES as u32
+        );
+
+        let last = last_frame();
+        assert_eq!(last, vec![0x11, 0x22, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn only_negative_sequence_response_flag_produces_final() {
+        let payload = br#"{"result": {"text": "not-final"}}"#;
+        let non_final = frame::build(
+            MessageType::FullServerResponse,
+            Flags::HasSequence,
+            Serialization::Json,
+            payload,
+            Some(-4),
+        );
+        let event = parse_server_frame(&non_final)
+            .unwrap()
+            .expect("event exists");
+        assert!(matches!(event, RecognitionEvent::Partial(text) if text == "not-final"));
+
+        let invalid = frame::build(
+            MessageType::FullServerResponse,
+            Flags::LastPacket,
+            Serialization::Json,
+            payload,
+            None,
+        );
+        assert!(matches!(
+            parse_server_frame(&invalid),
+            Err(SpikeError::Protocol)
+        ));
     }
 }
