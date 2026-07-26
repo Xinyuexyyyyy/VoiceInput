@@ -4,6 +4,7 @@
 //! Credential values, frame payloads, and transcript text never enter logs.
 
 use std::collections::HashSet;
+use std::sync::Once;
 use std::time::Duration;
 
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -29,6 +30,8 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const FINALIZE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVER_QUEUE_CAPACITY: usize = 32;
 
+static RUSTLS_PROVIDER: Once = Once::new();
+
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Writer = futures_util::stream::SplitSink<Ws, Message>;
 
@@ -43,6 +46,16 @@ pub enum RecognitionEvent {
     Final(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FrameHeader {
+    pub version: u8,
+    pub header_words: u8,
+    pub message_type: u8,
+    pub flags: u8,
+    pub serialization: u8,
+    pub compression: u8,
+}
+
 pub struct Session {
     writer: Writer,
     pending_audio: Vec<u8>,
@@ -53,6 +66,7 @@ pub async fn connect(
     credentials: Credentials,
     hotwords: &[String],
 ) -> Result<(Session, mpsc::Receiver<ServerMessage>), SpikeError> {
+    install_rustls_provider();
     let connect_id = Uuid::new_v4().to_string();
     let websocket = connect_with_retry(&credentials, &connect_id).await?;
     let (writer, mut reader) = websocket.split();
@@ -86,6 +100,12 @@ pub async fn connect(
     };
     session.send_initial_request(&connect_id, hotwords).await?;
     Ok((session, server_rx))
+}
+
+fn install_rustls_provider() {
+    RUSTLS_PROVIDER.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }
 
 impl Session {
@@ -279,7 +299,9 @@ pub fn parse_server_frame(bytes: &[u8]) -> Result<Option<RecognitionEvent>, Spik
     }
     if !matches!(
         parsed.flags,
-        flag if flag == Flags::HasSequence as u8 || flag == Flags::LastPacketWithSequence as u8
+        flag if flag == Flags::None as u8
+            || flag == Flags::HasSequence as u8
+            || flag == Flags::LastPacketWithSequence as u8
     ) {
         return Err(SpikeError::Protocol);
     }
@@ -291,6 +313,20 @@ pub fn parse_server_frame(bytes: &[u8]) -> Result<Option<RecognitionEvent>, Spik
         return Ok(Some(RecognitionEvent::Final(text)));
     }
     Ok(Some(RecognitionEvent::Partial(text)))
+}
+
+pub fn inspect_frame_header(bytes: &[u8]) -> Option<FrameHeader> {
+    let [first, second, third, ..] = bytes else {
+        return None;
+    };
+    Some(FrameHeader {
+        version: first >> 4,
+        header_words: first & 0x0f,
+        message_type: second >> 4,
+        flags: second & 0x0f,
+        serialization: third >> 4,
+        compression: third & 0x0f,
+    })
 }
 
 async fn connect_with_retry(credentials: &Credentials, connect_id: &str) -> Result<Ws, SpikeError> {
@@ -482,5 +518,38 @@ mod tests {
             parse_server_frame(&invalid),
             Err(SpikeError::Protocol)
         ));
+    }
+
+    #[test]
+    fn unsequenced_server_acknowledgement_is_ignored() {
+        let acknowledgement = frame::build(
+            MessageType::FullServerResponse,
+            Flags::None,
+            Serialization::Json,
+            br#"{"code": 1000}"#,
+            None,
+        );
+        assert!(parse_server_frame(&acknowledgement)
+            .expect("acknowledgement is valid")
+            .is_none());
+    }
+
+    #[test]
+    fn rustls_crypto_provider_is_initialized() {
+        install_rustls_provider();
+        assert!(rustls::crypto::CryptoProvider::get_default().is_some());
+    }
+
+    #[test]
+    fn header_inspection_excludes_payload() {
+        let header = inspect_frame_header(&[0x11, 0x93, 0x10, 0x00, b's', b'e', b'c'])
+            .expect("header is present");
+        assert_eq!(header.version, 1);
+        assert_eq!(header.header_words, 1);
+        assert_eq!(header.message_type, MessageType::FullServerResponse as u8);
+        assert_eq!(header.flags, Flags::LastPacketWithSequence as u8);
+        assert_eq!(header.serialization, Serialization::Json as u8);
+        assert_eq!(header.compression, 0);
+        assert!(inspect_frame_header(&[0x11, 0x93]).is_none());
     }
 }

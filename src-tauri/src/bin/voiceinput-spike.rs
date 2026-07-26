@@ -4,8 +4,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use voiceinput_lib::spike::{
-    connect, parse_server_frame, Credentials, RecognitionEvent, Recorder, SafeEvent, ServerMessage,
-    SpikeError, SpikePhase,
+    connect, inspect_frame_header, parse_server_frame, Credentials, RecognitionEvent, Recorder,
+    SafeEvent, ServerMessage, SpikeError, SpikePhase,
 };
 
 const FINAL_TIMEOUT: Duration = Duration::from_secs(12);
@@ -28,7 +28,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), SpikeError> {
-    let hotwords = parse_hotwords()?;
+    let options = parse_options()?;
     let started = Instant::now();
     let credentials = Credentials::load()?;
     SafeEvent {
@@ -49,7 +49,7 @@ async fn run() -> Result<(), SpikeError> {
         error: None,
     }
     .write_to_stderr();
-    let (mut session, mut server_rx) = connect(credentials, &hotwords).await?;
+    let (mut session, mut server_rx) = connect(credentials, &options.hotwords).await?;
     let (audio_tx, mut audio_rx) = mpsc::channel(AUDIO_QUEUE_CAPACITY);
     let recorder = Recorder::start_default(audio_tx)?;
     let mut recorder_failure = recorder.failure_receiver();
@@ -108,7 +108,14 @@ async fn run() -> Result<(), SpikeError> {
         error: None,
     }
     .write_to_stderr();
-    println!("最终文本（仅本次终端显示，不写入日志）：\n{final_text}");
+    if options.verify_token.is_some() {
+        println!(
+            "[spike] verification final_nonempty=true exact_token_preserved={}",
+            has_exact_token(&final_text, "area")
+        );
+    } else {
+        println!("最终文本（仅本次终端显示，不写入日志）：\n{final_text}");
+    }
     Ok(())
 }
 
@@ -117,7 +124,7 @@ fn receive_during_recording(
     partial: &mut Option<String>,
 ) -> Result<(), SpikeError> {
     match message {
-        Some(ServerMessage::Frame(bytes)) => match parse_server_frame(&bytes)? {
+        Some(ServerMessage::Frame(bytes)) => match parse_with_safe_header(&bytes)? {
             Some(RecognitionEvent::Partial(text)) => *partial = Some(text),
             Some(RecognitionEvent::Final(_)) => return Err(SpikeError::Protocol),
             None => {}
@@ -134,7 +141,7 @@ async fn await_final(
 ) -> Result<String, SpikeError> {
     while let Some(message) = server_rx.recv().await {
         match message {
-            ServerMessage::Frame(bytes) => match parse_server_frame(&bytes)? {
+            ServerMessage::Frame(bytes) => match parse_with_safe_header(&bytes)? {
                 Some(RecognitionEvent::Final(text)) => return Ok(text),
                 Some(RecognitionEvent::Partial(text)) => *partial = Some(text),
                 None => {}
@@ -144,6 +151,26 @@ async fn await_final(
         }
     }
     Err(SpikeError::NoFinalResult)
+}
+
+fn parse_with_safe_header(bytes: &[u8]) -> Result<Option<RecognitionEvent>, SpikeError> {
+    let event = parse_server_frame(bytes);
+    if matches!(event, Err(SpikeError::Protocol)) {
+        if let Some(header) = inspect_frame_header(bytes) {
+            eprintln!(
+                "[spike] protocol_header version={} header_words={} type={} flags={} serialization={} compression={}",
+                header.version,
+                header.header_words,
+                header.message_type,
+                header.flags,
+                header.serialization,
+                header.compression,
+            );
+        } else {
+            eprintln!("[spike] protocol_header unavailable");
+        }
+    }
+    event
 }
 
 async fn wait_for_enter() -> Result<(), SpikeError> {
@@ -158,15 +185,53 @@ async fn wait_for_enter() -> Result<(), SpikeError> {
     .map_err(|_| SpikeError::MicrophoneFailed)?
 }
 
-fn parse_hotwords() -> Result<Vec<String>, SpikeError> {
+struct RunOptions {
+    hotwords: Vec<String>,
+    verify_token: Option<()>,
+}
+
+fn parse_options() -> Result<RunOptions, SpikeError> {
     let mut args = std::env::args().skip(1);
     let mut hotwords = Vec::new();
+    let mut verify_token = None;
     while let Some(argument) = args.next() {
-        if argument != "--hotword" {
-            return Err(SpikeError::InvalidArguments);
+        match argument.as_str() {
+            "--hotword" => {
+                let word = args.next().ok_or(SpikeError::InvalidArguments)?;
+                hotwords.push(word);
+            }
+            "--verify-area" if verify_token.is_none() => verify_token = Some(()),
+            _ => return Err(SpikeError::InvalidArguments),
         }
-        let word = args.next().ok_or(SpikeError::InvalidArguments)?;
-        hotwords.push(word);
     }
-    Ok(hotwords)
+    Ok(RunOptions {
+        hotwords,
+        verify_token,
+    })
+}
+
+fn has_exact_token(text: &str, token: &str) -> bool {
+    text.match_indices(token).any(|(start, _)| {
+        let end = start + token.len();
+        let before = text[..start].chars().next_back();
+        let after = text[end..].chars().next();
+        !before.is_some_and(is_ascii_identifier_character)
+            && !after.is_some_and(is_ascii_identifier_character)
+    })
+}
+
+fn is_ascii_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_exact_token;
+
+    #[test]
+    fn area_verification_rejects_larger_ascii_identifiers() {
+        assert!(has_exact_token("调整 area 的大小", "area"));
+        assert!(!has_exact_token("调整 areal 的大小", "area"));
+        assert!(!has_exact_token("调整 area_1 的大小", "area"));
+    }
 }

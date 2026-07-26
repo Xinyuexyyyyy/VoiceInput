@@ -39,6 +39,15 @@ Gate B：分别执行五次无热词和五次带热词测试。每次带热词�
 cargo run --bin voiceinput-spike -- --hotword area
 ```
 
+需要在不显示转写正文的情况下记录 Gate B 布尔结果时，使用：
+
+```powershell
+cargo run --bin voiceinput-spike -- --verify-area
+cargo run --bin voiceinput-spike -- --verify-area --hotword area
+```
+
+`--verify-area` 只输出 final 是否非空以及英文 `area` 是否作为精确标识符出现；它不会输出转写正文。
+
 五句建议依次为：
 
 1. 我需要调整这个 area 的大小。
