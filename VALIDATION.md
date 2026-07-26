@@ -9,8 +9,8 @@
 | `npm run check` | 通过 |
 | `npm run build` | 通过 |
 | `cargo fmt --all --check` | 通过 |
-| `cargo test --offline` | 20/20 通过 |
-| `cargo +1.88.0 test --offline` | 20/20 通过 |
+| `cargo test --offline` | 20 个库测试 + 1 个 spike 测试通过 |
+| `cargo +1.88.0 test --offline` | 20 个库测试 + 1 个 spike 测试通过 |
 | `.env.local` Git 忽略规则 | 通过 |
 | 构建产物 Git 忽略规则 | 通过 |
 | 未配置凭据失败路径 | 通过，分类为 `credentials`；未启动麦克风或网络会话 |
