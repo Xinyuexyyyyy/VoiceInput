@@ -21,7 +21,7 @@ const AUDIO_QUEUE_CAPACITY: usize = 64;
 const FINAL_TIMEOUT: Duration = Duration::from_secs(12);
 const FINALIZE_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const RECORDING_LIMIT: Duration = Duration::from_secs(120);
-const TERMINAL_STATUS_DELAY: Duration = Duration::from_millis(1_500);
+const TERMINAL_STATUS_DELAY: Duration = Duration::from_secs(4);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

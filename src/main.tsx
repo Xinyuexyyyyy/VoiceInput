@@ -39,8 +39,8 @@ const labels: Record<SessionPhase, string> = {
   listening: "正在聆听",
   finalizing: "正在生成最终文字",
   inserted: "已写入当前输入位置",
-  copied: "未自动写入，已复制",
-  partial_copied: "网络异常，已复制部分结果",
+  copied: "已复制到剪贴板",
+  partial_copied: "已复制部分文字",
   error: "本次听写失败",
   cancelled: "已取消",
 };
@@ -111,6 +111,8 @@ function App() {
   const hint =
     status.phase === "listening"
       ? "Alt + Space 结束  ·  Esc 取消"
+      : ["copied", "partial_copied"].includes(status.phase)
+        ? "按 Ctrl + V 粘贴"
       : ["starting", "finalizing"].includes(status.phase)
         ? "Esc 取消"
         : null;

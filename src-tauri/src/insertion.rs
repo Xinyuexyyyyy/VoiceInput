@@ -33,23 +33,30 @@ impl TextInserter for WindowsTextInserter {
             return self.copy_only(text);
         }
 
-        let Ok(mut clipboard) = Clipboard::new() else {
-            return InsertOutcome::Failed;
+        let previous_text = {
+            let Ok(mut clipboard) = Clipboard::new() else {
+                return InsertOutcome::Failed;
+            };
+            let previous_text = clipboard.get_text().ok();
+            if clipboard.set_text(text.to_owned()).is_err() {
+                return InsertOutcome::Failed;
+            }
+            previous_text
         };
-        let previous_text = clipboard.get_text().ok();
-        if clipboard.set_text(text.to_owned()).is_err() {
-            return InsertOutcome::Failed;
-        }
+
+        // The target process must open the clipboard itself to handle Ctrl+V.
         if !send_ctrl_v() {
             return InsertOutcome::Copied;
         }
 
         // Restore only when the clipboard was not changed by another app after
         // the paste. Non-text clipboard data cannot be reconstructed safely.
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if clipboard.get_text().ok().as_deref() == Some(text) {
-            if let Some(previous_text) = previous_text {
-                let _ = clipboard.set_text(previous_text);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if let Ok(mut clipboard) = Clipboard::new() {
+            if clipboard.get_text().ok().as_deref() == Some(text) {
+                if let Some(previous_text) = previous_text {
+                    let _ = clipboard.set_text(previous_text);
+                }
             }
         }
         InsertOutcome::Inserted
