@@ -37,6 +37,12 @@ pub enum SessionPhase {
     Cancelled,
 }
 
+impl SessionPhase {
+    pub fn presents_overlay(self) -> bool {
+        !matches!(self, Self::Idle)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionError {
@@ -542,5 +548,22 @@ mod tests {
 
         std::thread::sleep(TERMINAL_STATUS_DELAY + Duration::from_millis(100));
         assert_eq!(controller.status().phase, SessionPhase::Idle);
+    }
+
+    #[test]
+    fn overlay_is_hidden_only_while_idle() {
+        assert!(!SessionPhase::Idle.presents_overlay());
+        for phase in [
+            SessionPhase::Starting,
+            SessionPhase::Listening,
+            SessionPhase::Finalizing,
+            SessionPhase::Inserted,
+            SessionPhase::Copied,
+            SessionPhase::PartialCopied,
+            SessionPhase::Error,
+            SessionPhase::Cancelled,
+        ] {
+            assert!(phase.presents_overlay(), "{phase:?} must be visible");
+        }
     }
 }

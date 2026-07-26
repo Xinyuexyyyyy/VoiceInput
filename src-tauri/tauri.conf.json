@@ -13,10 +13,17 @@
     "windows": [
       {
         "title": "VoiceInput",
-        "width": 360,
-        "height": 300,
+        "width": 390,
+        "height": 128,
         "resizable": false,
-        "visible": true
+        "visible": false,
+        "focus": false,
+        "focusable": false,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true
       }
     ],
     "security": {

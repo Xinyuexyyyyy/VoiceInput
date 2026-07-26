@@ -1,4 +1,6 @@
+mod hotkey;
 mod insertion;
+mod overlay;
 mod session;
 
 pub mod spike;
@@ -20,29 +22,13 @@ fn session_status(state: State<'_, AppState>) -> SessionStatus {
     state.session.status()
 }
 
-#[tauri::command]
-fn toggle_session(state: State<'_, AppState>) -> SessionStatus {
-    state.session.toggle();
-    state.session.status()
-}
-
-#[tauri::command]
-fn cancel_session(state: State<'_, AppState>) -> SessionStatus {
-    state.session.cancel();
-    state.session.status()
-}
-
 pub fn run() {
     let session = SessionController::new(Arc::new(WindowsTextInserter));
     let shortcut_plugin = tauri_plugin_global_shortcut::Builder::new()
-        .with_shortcuts(["ctrl+alt+space"])
-        .expect("VoiceInput global shortcut registration could not be configured")
         .with_handler(|app, shortcut, event| {
             if event.state == ShortcutState::Pressed {
                 let session = &app.state::<AppState>().session;
-                if shortcut.matches(Modifiers::CONTROL | Modifiers::ALT, Code::Space) {
-                    session.toggle();
-                } else if shortcut.matches(Modifiers::empty(), Code::Escape) {
+                if shortcut.matches(Modifiers::empty(), Code::Escape) {
                     session.cancel();
                 }
             }
@@ -54,12 +40,13 @@ pub fn run() {
             session: session.clone(),
         })
         .plugin(shortcut_plugin)
-        .invoke_handler(tauri::generate_handler![
-            session_status,
-            toggle_session,
-            cancel_session
-        ])
+        .invoke_handler(tauri::generate_handler![session_status])
         .setup(move |app| {
+            hotkey::install(session.clone())
+                .expect("VoiceInput Alt+Space keyboard hook could not be installed");
+            if let Some(window) = app.get_webview_window("main") {
+                overlay::prepare(&window);
+            }
             let mut status_rx = session.subscribe_status();
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
@@ -76,7 +63,10 @@ pub fn run() {
                     } else if !active && app_handle.global_shortcut().is_registered("esc") {
                         let _ = app_handle.global_shortcut().unregister("esc");
                     }
-                    let _ = app_handle.emit("voiceinput://status", status);
+                    let _ = app_handle.emit("voiceinput://status", &status);
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        overlay::sync(&window, &status);
+                    }
                 }
             });
             Ok(())

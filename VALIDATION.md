@@ -25,8 +25,8 @@
 - 为 Rustls 0.23 显式安装 `ring` crypto provider，避免 Windows 上 TLS 握手因缺少默认 provider 发生 panic。
 - 服务端会在识别前发送 `FullServerResponse` / `flags=0` 的 JSON 确认帧；该帧现在被安全忽略，只有 `flags=3` 的结果会作为 final。
 - `--verify-area` 只输出 `final_nonempty` 和 `exact_token_preserved` 布尔值，用于真声验收时避免把转写正文带入输出或记录。
-- 开发原型新增单会话状态机、`Ctrl+Alt+Space` Toggle、活动会话内的 `Esc` 取消、120 秒录音上限，以及 Windows 同窗口粘贴/窗口变化复制降级；前后端状态不含转写正文。
-- 可见 Tauri 开发实例已实测完成 `就绪 → 正在启动 → 已取消 → 就绪`；`Ctrl+Alt+Space` 启动和活动期间 `Esc` 取消均生效，且取消后约 1.5 秒自动复位。
+- 开发原型新增单会话状态机、`Alt+Space` Toggle、活动会话内的 `Esc` 取消、120 秒录音上限，以及 Windows 同窗口粘贴/窗口变化复制降级；前后端状态不含转写正文。
+- 状态提示框在非空闲阶段显示，空闲时隐藏；它禁用窗口激活和鼠标交互，不显示转写正文。`Alt+Space` 由 Windows 低级键盘钩子处理，以避开窗口系统菜单冲突；其真实按键与全流程行为仍需在本机验证后更新本记录。
 - `cargo check --offline`、`cargo test --offline`（20 + 1 项）、`npm run build` 均通过；Tauri 开发实例初始化成功，`http://localhost:1420/` 返回 200。
 
 ## 开发原型运行时边界

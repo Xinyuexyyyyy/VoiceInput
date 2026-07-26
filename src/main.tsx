@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 
@@ -35,7 +35,7 @@ type SessionStatus = {
 
 const labels: Record<SessionPhase, string> = {
   idle: "就绪",
-  starting: "正在启动",
+  starting: "正在启动听写",
   listening: "正在聆听",
   finalizing: "正在生成最终文字",
   inserted: "已写入当前输入位置",
@@ -66,10 +66,15 @@ const initialStatus: SessionStatus = {
 
 function App() {
   const [status, setStatus] = useState<SessionStatus>(initialStatus);
-  const active = useMemo(
-    () => ["starting", "listening", "finalizing"].includes(status.phase),
-    [status.phase],
-  );
+  const [receivedAt, setReceivedAt] = useState(Date.now());
+  const [now, setNow] = useState(Date.now());
+
+  const updateStatus = (next: SessionStatus) => {
+    setStatus(next);
+    const receivedAt = Date.now();
+    setReceivedAt(receivedAt);
+    setNow(receivedAt);
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -77,7 +82,7 @@ function App() {
 
     void (async () => {
       const dispose = await listen<SessionStatus>("voiceinput://status", (event) => {
-        if (mounted) setStatus(event.payload);
+        if (mounted) updateStatus(event.payload);
       });
       if (!mounted) {
         dispose();
@@ -85,63 +90,42 @@ function App() {
       }
       unlisten = dispose;
       const next = await invoke<SessionStatus>("session_status");
-      if (mounted) setStatus(next);
+      if (mounted) updateStatus(next);
     })();
-
-    const refreshStatus = () => {
-      void invoke<SessionStatus>("session_status").then((next) => {
-        if (mounted) setStatus(next);
-      });
-    };
-    const poll = window.setInterval(refreshStatus, 500);
 
     return () => {
       mounted = false;
-      window.clearInterval(poll);
       unlisten?.();
     };
   }, []);
 
-  const toggle = async () => {
-    setStatus(await invoke<SessionStatus>("toggle_session"));
-  };
+  useEffect(() => {
+    if (status.phase !== "listening") return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [status.phase]);
 
-  const cancel = async () => {
-    setStatus(await invoke<SessionStatus>("cancel_session"));
-  };
-
-  const primaryLabel =
+  const elapsedMs =
+    status.phase === "listening" ? status.elapsed_ms + now - receivedAt : status.elapsed_ms;
+  const elapsed = new Date(Math.max(elapsedMs, 0)).toISOString().slice(14, 19);
+  const hint =
     status.phase === "listening"
-      ? "停止录音"
-      : active
-        ? "取消本次"
-        : "开始录音";
+      ? "Alt + Space 结束  ·  Esc 取消"
+      : ["starting", "finalizing"].includes(status.phase)
+        ? "Esc 取消"
+        : null;
 
   return (
-    <main aria-label="VoiceInput">
-      <section className="panel" aria-live="polite">
-        <div className="brand-row">
-          <div>
-            <p className="eyebrow">VOICE INPUT</p>
-            <h1>VoiceInput</h1>
-          </div>
+    <main aria-label="语音输入状态">
+      <section className={`capsule capsule-${status.phase}`} aria-live="polite">
+        <div className="status-row">
           <span className={`status-dot status-${status.phase}`} aria-hidden="true" />
+          <p className="status">{labels[status.phase]}</p>
+          {status.phase === "listening" && <time>{elapsed}</time>}
         </div>
 
-        <p className="status">{labels[status.phase]}</p>
-        <p className="shortcut">Ctrl + Alt + Space</p>
-
-        <div className="actions">
-          <button className="primary" type="button" onClick={() => void toggle()}>
-            {primaryLabel}
-          </button>
-          <button type="button" onClick={() => void cancel()} disabled={!active}>
-            取消
-          </button>
-        </div>
-
+        {hint && <p className="hint">{hint}</p>}
         {status.error && <p className="error">{errorHints[status.error]}</p>}
-        <p className="privacy">不显示、不保存录音或转写正文。</p>
       </section>
     </main>
   );
