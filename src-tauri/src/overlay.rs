@@ -10,6 +10,7 @@ use crate::session::SessionStatus;
 
 pub fn prepare(window: &WebviewWindow) {
     let _ = window.set_ignore_cursor_events(true);
+    let _ = window.hide();
 }
 
 pub fn sync(window: &WebviewWindow, status: &SessionStatus) {

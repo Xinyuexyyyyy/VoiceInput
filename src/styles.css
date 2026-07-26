@@ -1,6 +1,6 @@
 :root {
   font-family: "Segoe UI", sans-serif;
-  color: #f7fafc;
+  color: #f4f7f8;
   background: transparent;
 }
 
@@ -12,30 +12,31 @@ body {
 
 main {
   min-height: 100vh;
-  padding: 12px;
+  padding: 8px;
   box-sizing: border-box;
 }
 
 .capsule {
-  min-height: 104px;
+  min-height: 58px;
   box-sizing: border-box;
-  padding: 20px 22px;
-  border: 1px solid rgb(255 255 255 / 22%);
+  padding: 10px 14px;
+  border: 1px solid rgb(255 255 255 / 16%);
   border-radius: 8px;
-  background: rgb(23 33 43 / 94%);
-  box-shadow: 0 12px 28px rgb(0 0 0 / 26%);
+  background: rgb(20 28 34 / 97%);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 22%);
 }
 
 .status-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 9px;
+  min-height: 20px;
 }
 
 .status-dot {
-  width: 12px;
-  height: 12px;
-  flex: 0 0 12px;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
   border-radius: 50%;
   background: #a2adb8;
 }
@@ -61,26 +62,31 @@ main {
 
 .status {
   margin: 0;
-  font-size: 17px;
-  font-weight: 650;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 20px;
 }
 
 .hint,
 .error,
 time {
   margin: 0;
-  color: #c2ccd4;
-  font-size: 13px;
-  line-height: 1.5;
+  color: #b8c3c9;
+  font-size: 12px;
+  line-height: 17px;
 }
 
 time {
   margin-left: auto;
-  color: #f7fafc;
+  color: #e8edef;
   font-variant-numeric: tabular-nums;
 }
 
+.hint {
+  margin: 4px 0 0 17px;
+}
+
 .error {
-  margin-top: 10px;
-  color: #ffd0d0;
+  margin: 4px 0 0 17px;
+  color: #ffc9c5;
 }
