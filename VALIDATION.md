@@ -9,8 +9,8 @@
 | `npm run check` | 通过 |
 | `npm run build` | 通过 |
 | `cargo fmt --all --check` | 通过 |
-| `cargo test --locked` | 17/17 通过 |
-| `cargo +1.88.0 test --locked` | 17/17 通过 |
+| `cargo test --offline` | 20/20 通过 |
+| `cargo +1.88.0 test --offline` | 20/20 通过 |
 | `.env.local` Git 忽略规则 | 通过 |
 | 构建产物 Git 忽略规则 | 通过 |
 | 未配置凭据失败路径 | 通过，分类为 `credentials`；未启动麦克风或网络会话 |
@@ -25,6 +25,14 @@
 - 为 Rustls 0.23 显式安装 `ring` crypto provider，避免 Windows 上 TLS 握手因缺少默认 provider 发生 panic。
 - 服务端会在识别前发送 `FullServerResponse` / `flags=0` 的 JSON 确认帧；该帧现在被安全忽略，只有 `flags=3` 的结果会作为 final。
 - `--verify-area` 只输出 `final_nonempty` 和 `exact_token_preserved` 布尔值，用于真声验收时避免把转写正文带入输出或记录。
+- 开发原型新增单会话状态机、`Ctrl+Alt+Space` Toggle、活动会话内的 `Esc` 取消、120 秒录音上限，以及 Windows 同窗口粘贴/窗口变化复制降级；前后端状态不含转写正文。
+- 可见 Tauri 开发实例已实测完成 `就绪 → 正在启动 → 已取消 → 就绪`；`Ctrl+Alt+Space` 启动和活动期间 `Esc` 取消均生效，且取消后约 1.5 秒自动复位。
+- `cargo check --offline`、`cargo test --offline`（20 + 1 项）、`npm run build` 均通过；Tauri 开发实例初始化成功，`http://localhost:1420/` 返回 200。
+
+## 开发原型运行时边界
+
+- 已验证：窗口启动、全局开始/取消快捷键、状态同步和取消后的资源路径。
+- 尚未由本轮自动化验证：在 Notepad、浏览器和 Obsidian 中取得真实 final 后的自动粘贴，以及目标窗口变化时的剪贴板降级；这两项不应被表述为已通过。
 
 ## Gate A：真实旧版凭据
 
@@ -43,7 +51,7 @@ cargo run --bin voiceinput-spike
 
 ## Gate B：`area` 真声测试
 
-状态：**Fail**
+状态：**Fail（已授权暂缓）**
 
 已完成五组中英混合真声对照。每一有效样本都收到非空 final；以下表格不保存转写正文，只记录 final 是否非空及 `area` 是否精确保留英文。
 
@@ -69,4 +77,4 @@ cd H:\workspace-daily\voice-input\src-tauri
 cargo run --bin voiceinput-spike -- --hotword area
 ```
 
-热词组精确保留结果为 **0/5**，未达到至少 4/5 的硬闸门。已复核 `enable_nonstream`、`request.corpus.context` 热词 JSON、服务端 `flags=3` final 选择和默认 Resource ID；在参数正确但结果仍失败的情况下，按 PRD Stop Condition 停止后续 Slice，并重新评估 ASR 路线。不得进入 Slice 2。
+热词组精确保留结果为 **0/5**，未达到至少 4/5 的硬闸门。已复核 `enable_nonstream`、`request.corpus.context` 热词 JSON、服务端 `flags=3` final 选择和默认 Resource ID。用户于 2026-07-26 明确授权将该准确性问题暂缓，先推进基础可用性；不得宣称该英文词保留问题已经解决，后续仍需重新评估 ASR 路线。

@@ -1,11 +1,12 @@
 # VoiceInput
 
-Windows 10/11 的极简 Tauri 2 + Rust + React/TypeScript 骨架。本仓库当前只完成：
+Windows 10/11 的极简 Tauri 2 + Rust + React/TypeScript 语音输入原型。本仓库当前已完成：
 
 - Slice 0：项目、MIT 许可、最小状态与脱敏日志边界；
 - Slice 1：火山引擎旧版 `App ID + Access Token` 的本地 Protocol spike。
+- Slice 2/3：单会话 Toggle、取消、120 秒上限、最终结果的 Windows 粘贴与剪贴板降级。
 
-未实现设置页、托盘、状态胶囊、全局热键、文字写入、开机启动或安装包。
+未实现设置页、托盘、状态胶囊、Windows Credential Manager、开机启动或安装包。
 
 ## 本地凭据
 
@@ -18,6 +19,20 @@ VOICEINPUT_VOLC_RESOURCE_ID=volc.seedasr.sauc.duration
 ```
 
 也可使用同名环境变量。环境变量优先于 `.env.local`。真实凭据不得写入仓库、聊天、测试数据、截图或日志。
+
+`.env.local` 只用于当前开发原型；正式应用会改用 Windows Credential Manager，不把本地明文文件作为发布方案。
+
+## 开发原型
+
+在项目根目录运行：
+
+```powershell
+npm run tauri dev
+```
+
+默认快捷键为 `Ctrl+Alt+Space`：首次按下开始，第二次按下结束并等待最终结果。会话活动期间可按 `Esc` 取消。最终结果只尝试写入开始录音时的同一前台窗口；窗口变化、模拟粘贴失败时会复制到剪贴板。界面不会显示或保存转写正文。
+
+已知限制：`area` 热词真声测试结果为 0/5。用户已授权先推进基础可用性，但本项目不宣称英文 `area` 保留问题已经解决。
 
 ## Protocol spike
 

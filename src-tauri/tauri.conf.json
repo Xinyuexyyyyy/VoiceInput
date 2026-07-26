@@ -13,9 +13,10 @@
     "windows": [
       {
         "title": "VoiceInput",
-        "width": 800,
-        "height": 600,
-        "visible": false
+        "width": 360,
+        "height": 300,
+        "resizable": false,
+        "visible": true
       }
     ],
     "security": {
