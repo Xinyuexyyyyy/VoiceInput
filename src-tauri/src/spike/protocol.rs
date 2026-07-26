@@ -9,14 +9,17 @@ use std::time::Duration;
 
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::HeaderValue;
 use tokio_tungstenite::tungstenite::{Error as WsError, Message};
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{client_async_tls, connect_async, MaybeTlsStream, WebSocketStream};
 use uuid::Uuid;
+use winreg::enums::HKEY_CURRENT_USER;
+use winreg::RegKey;
 
 use crate::spike::credentials::Credentials;
 use crate::spike::error::SpikeError;
@@ -29,6 +32,9 @@ const CONNECT_ATTEMPTS: usize = 3;
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const FINALIZE_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const SERVER_QUEUE_CAPACITY: usize = 32;
+const PROXY_RESPONSE_LIMIT: usize = 8_192;
+const INTERNET_SETTINGS_KEY: &str =
+    "Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings";
 
 static RUSTLS_PROVIDER: Once = Once::new();
 
@@ -330,9 +336,10 @@ pub fn inspect_frame_header(bytes: &[u8]) -> Option<FrameHeader> {
 }
 
 async fn connect_with_retry(credentials: &Credentials, connect_id: &str) -> Result<Ws, SpikeError> {
+    let proxy = system_http_proxy();
     for attempt in 1..=CONNECT_ATTEMPTS {
         let request = build_request(credentials, connect_id)?;
-        match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(request)).await {
+        match tokio::time::timeout(CONNECT_TIMEOUT, connect_once(request, proxy.as_deref())).await {
             Ok(Ok((websocket, _))) => return Ok(websocket),
             Ok(Err(error)) => {
                 let classified = classify_connect_error(error);
@@ -346,6 +353,119 @@ async fn connect_with_retry(credentials: &Credentials, connect_id: &str) -> Resu
         tokio::time::sleep(Duration::from_millis(250 * attempt as u64)).await;
     }
     Err(SpikeError::Network)
+}
+
+async fn connect_once(
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    proxy: Option<&str>,
+) -> Result<
+    (
+        Ws,
+        tokio_tungstenite::tungstenite::handshake::client::Response,
+    ),
+    WsError,
+> {
+    match proxy {
+        Some(proxy) => {
+            let stream = open_proxy_tunnel(proxy).await.map_err(WsError::Io)?;
+            client_async_tls(request, stream).await
+        }
+        None => connect_async(request).await,
+    }
+}
+
+fn system_http_proxy() -> Option<String> {
+    let current_user = RegKey::predef(HKEY_CURRENT_USER);
+    let settings = current_user.open_subkey(INTERNET_SETTINGS_KEY).ok()?;
+    let enabled: u32 = settings.get_value("ProxyEnable").ok()?;
+    if enabled == 0 {
+        return None;
+    }
+    let configured: String = settings.get_value("ProxyServer").ok()?;
+    parse_http_proxy(&configured)
+}
+
+fn parse_http_proxy(configured: &str) -> Option<String> {
+    let entries: Vec<_> = configured
+        .split(';')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .collect();
+    let preferred = entries.iter().find_map(|entry| {
+        let (scheme, address) = entry.split_once('=')?;
+        scheme
+            .trim()
+            .eq_ignore_ascii_case("https")
+            .then(|| address.trim())
+    });
+    let fallback = entries.iter().find_map(|entry| {
+        let (scheme, address) = entry.split_once('=')?;
+        scheme
+            .trim()
+            .eq_ignore_ascii_case("http")
+            .then(|| address.trim())
+    });
+    preferred
+        .or(fallback)
+        .or_else(|| entries.iter().copied().find(|entry| !entry.contains('=')))
+        .and_then(normalize_proxy_address)
+}
+
+fn normalize_proxy_address(address: &str) -> Option<String> {
+    let address = address
+        .trim()
+        .strip_prefix("http://")
+        .or_else(|| address.trim().strip_prefix("HTTP://"))
+        .unwrap_or(address.trim());
+    (!address.is_empty() && !address.contains('@') && address.contains(':'))
+        .then(|| address.to_owned())
+}
+
+async fn open_proxy_tunnel(proxy: &str) -> Result<TcpStream, std::io::Error> {
+    let mut stream = TcpStream::connect(proxy).await?;
+    stream
+        .write_all(
+            b"CONNECT openspeech.bytedance.com:443 HTTP/1.1\r\nHost: openspeech.bytedance.com:443\r\nProxy-Connection: Keep-Alive\r\n\r\n",
+        )
+        .await?;
+
+    let mut response = Vec::with_capacity(512);
+    let mut buffer = [0_u8; 512];
+    while !response.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+        let read = stream.read(&mut buffer).await?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "proxy closed CONNECT response",
+            ));
+        }
+        response.extend_from_slice(&buffer[..read]);
+        if response.len() > PROXY_RESPONSE_LIMIT {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "proxy CONNECT response exceeded limit",
+            ));
+        }
+    }
+    if !proxy_tunnel_succeeded(&response) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "proxy rejected CONNECT tunnel",
+        ));
+    }
+    Ok(stream)
+}
+
+fn proxy_tunnel_succeeded(response: &[u8]) -> bool {
+    let Some(line) = response.split(|byte| *byte == b'\n').next() else {
+        return false;
+    };
+    let mut fields = line
+        .trim_ascii_end()
+        .split(|byte| byte.is_ascii_whitespace())
+        .filter(|field| !field.is_empty());
+    let _version = fields.next();
+    matches!(fields.next(), Some(status) if status == b"200")
 }
 
 fn build_request(
@@ -551,5 +671,31 @@ mod tests {
         assert_eq!(header.serialization, Serialization::Json as u8);
         assert_eq!(header.compression, 0);
         assert!(inspect_frame_header(&[0x11, 0x93]).is_none());
+    }
+
+    #[test]
+    fn proxy_configuration_prefers_https_over_http() {
+        assert_eq!(
+            parse_http_proxy("http=127.0.0.1:8080; https=127.0.0.1:7890"),
+            Some("127.0.0.1:7890".to_owned())
+        );
+        assert_eq!(
+            parse_http_proxy("http://127.0.0.1:7890"),
+            Some("127.0.0.1:7890".to_owned())
+        );
+        assert_eq!(parse_http_proxy("https=user:secret@127.0.0.1:7890"), None);
+    }
+
+    #[test]
+    fn only_successful_connect_responses_open_a_proxy_tunnel() {
+        assert!(proxy_tunnel_succeeded(
+            b"HTTP/1.1 200 Connection established\r\n\r\n"
+        ));
+        assert!(proxy_tunnel_succeeded(b"HTTP/1.0 200 OK\r\n\r\n"));
+        assert!(!proxy_tunnel_succeeded(
+            b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n"
+        ));
+        assert!(!proxy_tunnel_succeeded(b"HTTP/1.1 2000 Invalid\r\n\r\n"));
+        assert!(!proxy_tunnel_succeeded(b"not an HTTP response\r\n\r\n"));
     }
 }

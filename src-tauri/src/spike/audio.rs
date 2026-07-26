@@ -15,6 +15,7 @@ use crate::spike::error::SpikeError;
 
 const TARGET_RATE: u32 = 16_000;
 const LOW_PASS_TAPS: usize = 63;
+const PACKET_BYTES: usize = (TARGET_RATE as usize / 5) * 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RecorderFailure {
@@ -33,6 +34,8 @@ impl RecorderFailure {
 
 pub struct Recorder {
     stream: cpal::Stream,
+    pipeline: Arc<Mutex<AudioPipeline>>,
+    tx: mpsc::Sender<Vec<u8>>,
     failure_rx: watch::Receiver<Option<RecorderFailure>>,
 }
 
@@ -46,26 +49,41 @@ impl Recorder {
             .default_input_config()
             .map_err(|_| SpikeError::MicrophoneUnavailable)?;
         let config: StreamConfig = supported.config();
-        let converter = Arc::new(Mutex::new(PcmConverter::new(
+        let pipeline = Arc::new(Mutex::new(AudioPipeline::new(
             config.channels as usize,
             config.sample_rate.0,
         )));
         let (failure_tx, failure_rx) = watch::channel(None);
 
         let stream = match supported.sample_format() {
-            SampleFormat::F32 => {
-                build_stream_f32(&device, &config, Arc::clone(&converter), tx, failure_tx)
+            SampleFormat::F32 => build_stream_f32(
+                &device,
+                &config,
+                Arc::clone(&pipeline),
+                tx.clone(),
+                failure_tx.clone(),
+            ),
+            SampleFormat::I16 => build_stream_i16(
+                &device,
+                &config,
+                Arc::clone(&pipeline),
+                tx.clone(),
+                failure_tx.clone(),
+            ),
+            SampleFormat::U16 => {
+                build_stream_u16(&device, &config, pipeline.clone(), tx.clone(), failure_tx)
             }
-            SampleFormat::I16 => {
-                build_stream_i16(&device, &config, Arc::clone(&converter), tx, failure_tx)
-            }
-            SampleFormat::U16 => build_stream_u16(&device, &config, converter, tx, failure_tx),
             _ => return Err(SpikeError::MicrophoneUnavailable),
         }
         .map_err(|_| SpikeError::MicrophoneUnavailable)?;
 
         stream.play().map_err(|_| SpikeError::MicrophoneFailed)?;
-        Ok(Self { stream, failure_rx })
+        Ok(Self {
+            stream,
+            pipeline,
+            tx,
+            failure_rx,
+        })
     }
 
     pub fn failure_receiver(&self) -> watch::Receiver<Option<RecorderFailure>> {
@@ -74,6 +92,22 @@ impl Recorder {
 
     pub fn stop(self) -> Result<(), SpikeError> {
         let _ = self.stream.pause();
+        if let Some(tail) = self
+            .pipeline
+            .lock()
+            .expect("audio pipeline lock poisoned")
+            .take_tail()
+        {
+            match self.tx.try_send(tail) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    return Err(SpikeError::AudioBackpressure)
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(SpikeError::MicrophoneFailed)
+                }
+            }
+        }
         match *self.failure_rx.borrow() {
             Some(failure) => Err(failure.into_error()),
             None => Ok(()),
@@ -84,14 +118,14 @@ impl Recorder {
 fn build_stream_f32(
     device: &cpal::Device,
     config: &StreamConfig,
-    converter: Arc<Mutex<PcmConverter>>,
+    pipeline: Arc<Mutex<AudioPipeline>>,
     tx: mpsc::Sender<Vec<u8>>,
     failure_tx: watch::Sender<Option<RecorderFailure>>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
     let error_tx = failure_tx.clone();
     device.build_input_stream(
         config,
-        move |samples: &[f32], _| forward(samples, &converter, &tx, &failure_tx),
+        move |samples: &[f32], _| forward(samples, &pipeline, &tx, &failure_tx),
         move |_| report_failure(&error_tx, RecorderFailure::Device),
         None,
     )
@@ -100,7 +134,7 @@ fn build_stream_f32(
 fn build_stream_i16(
     device: &cpal::Device,
     config: &StreamConfig,
-    converter: Arc<Mutex<PcmConverter>>,
+    pipeline: Arc<Mutex<AudioPipeline>>,
     tx: mpsc::Sender<Vec<u8>>,
     failure_tx: watch::Sender<Option<RecorderFailure>>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
@@ -112,7 +146,7 @@ fn build_stream_i16(
                 .iter()
                 .map(|sample| f32::from(*sample) / f32::from(i16::MAX))
                 .collect();
-            forward(&normalized, &converter, &tx, &failure_tx);
+            forward(&normalized, &pipeline, &tx, &failure_tx);
         },
         move |_| report_failure(&error_tx, RecorderFailure::Device),
         None,
@@ -122,7 +156,7 @@ fn build_stream_i16(
 fn build_stream_u16(
     device: &cpal::Device,
     config: &StreamConfig,
-    converter: Arc<Mutex<PcmConverter>>,
+    pipeline: Arc<Mutex<AudioPipeline>>,
     tx: mpsc::Sender<Vec<u8>>,
     failure_tx: watch::Sender<Option<RecorderFailure>>,
 ) -> Result<cpal::Stream, cpal::BuildStreamError> {
@@ -134,7 +168,7 @@ fn build_stream_u16(
                 .iter()
                 .map(|sample| (f32::from(*sample) / f32::from(u16::MAX)) * 2.0 - 1.0)
                 .collect();
-            forward(&normalized, &converter, &tx, &failure_tx);
+            forward(&normalized, &pipeline, &tx, &failure_tx);
         },
         move |_| report_failure(&error_tx, RecorderFailure::Device),
         None,
@@ -143,30 +177,58 @@ fn build_stream_u16(
 
 fn forward(
     samples: &[f32],
-    converter: &Arc<Mutex<PcmConverter>>,
+    pipeline: &Arc<Mutex<AudioPipeline>>,
     tx: &mpsc::Sender<Vec<u8>>,
     failure_tx: &watch::Sender<Option<RecorderFailure>>,
 ) {
-    let pcm = converter
+    let packets = pipeline
         .lock()
-        .expect("audio converter lock poisoned")
-        .convert(samples);
-    if pcm.is_empty() {
-        return;
-    }
-    match tx.try_send(pcm) {
-        Ok(()) => {}
-        Err(mpsc::error::TrySendError::Full(_)) => {
-            report_failure(failure_tx, RecorderFailure::QueueOverflow)
-        }
-        Err(mpsc::error::TrySendError::Closed(_)) => {
-            report_failure(failure_tx, RecorderFailure::Device)
+        .expect("audio pipeline lock poisoned")
+        .push(samples);
+    for packet in packets {
+        match tx.try_send(packet) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                report_failure(failure_tx, RecorderFailure::QueueOverflow);
+                return;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                report_failure(failure_tx, RecorderFailure::Device);
+                return;
+            }
         }
     }
 }
 
 fn report_failure(failure_tx: &watch::Sender<Option<RecorderFailure>>, failure: RecorderFailure) {
     let _ = failure_tx.send(Some(failure));
+}
+
+struct AudioPipeline {
+    converter: PcmConverter,
+    pending: Vec<u8>,
+}
+
+impl AudioPipeline {
+    fn new(channels: usize, input_rate: u32) -> Self {
+        Self {
+            converter: PcmConverter::new(channels, input_rate),
+            pending: Vec::with_capacity(PACKET_BYTES * 2),
+        }
+    }
+
+    fn push(&mut self, samples: &[f32]) -> Vec<Vec<u8>> {
+        self.pending.extend(self.converter.convert(samples));
+        let mut packets = Vec::new();
+        while self.pending.len() >= PACKET_BYTES {
+            packets.push(self.pending.drain(..PACKET_BYTES).collect());
+        }
+        packets
+    }
+
+    fn take_tail(&mut self) -> Option<Vec<u8>> {
+        (!self.pending.is_empty()).then(|| std::mem::take(&mut self.pending))
+    }
 }
 
 struct PcmConverter {
@@ -310,15 +372,36 @@ mod tests {
 
     #[tokio::test]
     async fn full_audio_queue_reports_backpressure() {
-        let converter = Arc::new(Mutex::new(PcmConverter::new(1, TARGET_RATE)));
+        let pipeline = Arc::new(Mutex::new(AudioPipeline::new(1, TARGET_RATE)));
         let (tx, mut rx) = mpsc::channel(1);
         let (failure_tx, failure_rx) = watch::channel(None);
 
-        forward(&[0.5], &converter, &tx, &failure_tx);
-        forward(&[0.25], &converter, &tx, &failure_tx);
+        forward(&vec![0.5; 3_200], &pipeline, &tx, &failure_tx);
+        forward(&vec![0.25; 3_200], &pipeline, &tx, &failure_tx);
 
         assert!(rx.recv().await.is_some());
         assert_eq!(*failure_rx.borrow(), Some(RecorderFailure::QueueOverflow));
+    }
+
+    #[tokio::test]
+    async fn capture_emits_200ms_packets_instead_of_callback_sized_packets() {
+        let pipeline = Arc::new(Mutex::new(AudioPipeline::new(1, TARGET_RATE)));
+        let (tx, mut rx) = mpsc::channel(2);
+        let (failure_tx, _) = watch::channel(None);
+
+        forward(&vec![0.5; 4_000], &pipeline, &tx, &failure_tx);
+
+        let packet = rx.recv().await.expect("one packet must be forwarded");
+        assert_eq!(packet.len(), 6_400);
+        assert_eq!(
+            pipeline
+                .lock()
+                .expect("audio pipeline lock")
+                .take_tail()
+                .unwrap()
+                .len(),
+            1_600
+        );
     }
 
     #[test]
