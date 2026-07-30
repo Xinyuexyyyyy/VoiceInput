@@ -15,9 +15,25 @@ pub fn prepare(window: &WebviewWindow) {
 
 pub fn sync(window: &WebviewWindow, status: &SessionStatus) {
     let result = if status.phase.presents_overlay() {
-        window.show()
+        show_without_activating(window)
     } else {
         window.hide()
     };
     let _ = result;
+}
+
+#[cfg(windows)]
+fn show_without_activating(window: &WebviewWindow) -> tauri::Result<()> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+
+    let hwnd = HWND(window.hwnd()?.0);
+    // The status window must never become the foreground input target.
+    let _ = unsafe { ShowWindow(hwnd, SW_SHOWNOACTIVATE) };
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn show_without_activating(window: &WebviewWindow) -> tauri::Result<()> {
+    window.show()
 }

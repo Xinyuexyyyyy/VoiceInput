@@ -138,7 +138,7 @@ fn classify_key_event(
     }
     if is_space && is_key_up {
         return KeyDecision {
-            consume: false,
+            consume: alt_space_active,
             action: None,
             space_held: false,
             alt_space_active,
@@ -199,6 +199,35 @@ mod tests {
         let released = classify_key_event(WM_SYSKEYUP, VK_MENU.0 as u32, false, true, true);
         assert!(released.consume);
         assert!(!released.alt_space_active);
+    }
+
+    #[test]
+    fn completing_a_chord_does_not_leave_a_system_key_event_for_the_next_toggle() {
+        let pressed = classify_key_event(WM_SYSKEYDOWN, VK_SPACE.0 as u32, true, false, false);
+        let space_released = classify_key_event(
+            WM_SYSKEYUP,
+            VK_SPACE.0 as u32,
+            true,
+            pressed.space_held,
+            pressed.alt_space_active,
+        );
+        assert!(space_released.consume);
+
+        let alt_released = classify_key_event(
+            WM_SYSKEYUP,
+            VK_MENU.0 as u32,
+            false,
+            space_released.space_held,
+            space_released.alt_space_active,
+        );
+        let next = classify_key_event(
+            WM_SYSKEYDOWN,
+            VK_SPACE.0 as u32,
+            true,
+            alt_released.space_held,
+            alt_released.alt_space_active,
+        );
+        assert_eq!(next.action, Some(HotkeyAction::Toggle));
     }
 
     #[test]

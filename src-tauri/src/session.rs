@@ -566,4 +566,25 @@ mod tests {
             assert!(phase.presents_overlay(), "{phase:?} must be visible");
         }
     }
+
+    #[test]
+    fn second_toggle_from_listening_publishes_finalizing() {
+        let controller = SessionController::new(Arc::new(crate::insertion::WindowsTextInserter));
+        let stop = CancellationToken::new();
+        {
+            let mut state = controller.inner.state.lock().expect("session state lock");
+            state.next_session_id = 1;
+            state.active = Some(ActiveSession {
+                id: 1,
+                stop: stop.clone(),
+                cancel: CancellationToken::new(),
+            });
+            state.status = SessionStatus::running(SessionPhase::Listening, Instant::now(), 0);
+        }
+
+        controller.toggle();
+
+        assert!(stop.is_cancelled());
+        assert_eq!(controller.status().phase, SessionPhase::Finalizing);
+    }
 }
