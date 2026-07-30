@@ -1,17 +1,16 @@
 //! Windows-specific global hotkey handling.
 //!
-//! `Alt+Space` is claimed by Windows for the foreground window's system menu,
-//! so it cannot reliably use the ordinary `RegisterHotKey` route. A low-level
-//! keyboard hook receives that system-key message before the foreground app
-//! and consumes only this chord. Escape remains with the Tauri shortcut plugin
-//! because it is registered only while a dictation session is active.
+//! `Alt+Z` is handled by a low-level keyboard hook so the foreground app does
+//! not receive the chord while dictation is toggled. Escape remains with the
+//! Tauri shortcut plugin because it is registered only while a dictation
+//! session is active.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, SyncSender};
 use std::sync::OnceLock;
 
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
-use windows::Win32::UI::Input::KeyboardAndMouse::{VK_MENU, VK_SPACE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{VK_MENU, VK_Z};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage,
     UnhookWindowsHookEx, HC_ACTION, KBDLLHOOKSTRUCT, LLKHF_ALTDOWN, MSG, WH_KEYBOARD_LL,
@@ -29,13 +28,13 @@ enum HotkeyAction {
 struct KeyDecision {
     consume: bool,
     action: Option<HotkeyAction>,
-    space_held: bool,
-    alt_space_active: bool,
+    trigger_held: bool,
+    alt_trigger_active: bool,
 }
 
 static EVENT_SENDER: OnceLock<Sender<HotkeyAction>> = OnceLock::new();
-static SPACE_HELD: AtomicBool = AtomicBool::new(false);
-static ALT_SPACE_ACTIVE: AtomicBool = AtomicBool::new(false);
+static TRIGGER_HELD: AtomicBool = AtomicBool::new(false);
+static ALT_TRIGGER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 pub fn install(session: SessionController) -> Result<(), HotkeyError> {
     let (event_tx, event_rx) = mpsc::channel();
@@ -92,18 +91,18 @@ unsafe fn run_hook_loop(ready_tx: SyncSender<Result<(), HotkeyError>>) {
 unsafe extern "system" fn keyboard_hook(code: i32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
     if code >= HC_ACTION as i32 {
         let event = *(l_param.0 as *const KBDLLHOOKSTRUCT);
-        let was_space_held = SPACE_HELD.load(Ordering::Relaxed);
-        let alt_space_active = ALT_SPACE_ACTIVE.load(Ordering::Relaxed);
+        let was_trigger_held = TRIGGER_HELD.load(Ordering::Relaxed);
+        let alt_trigger_active = ALT_TRIGGER_ACTIVE.load(Ordering::Relaxed);
         let decision = classify_key_event(
             w_param.0 as u32,
             event.vkCode,
             event.flags.contains(LLKHF_ALTDOWN),
-            was_space_held,
-            alt_space_active,
+            was_trigger_held,
+            alt_trigger_active,
         );
 
-        SPACE_HELD.store(decision.space_held, Ordering::Relaxed);
-        ALT_SPACE_ACTIVE.store(decision.alt_space_active, Ordering::Relaxed);
+        TRIGGER_HELD.store(decision.trigger_held, Ordering::Relaxed);
+        ALT_TRIGGER_ACTIVE.store(decision.alt_trigger_active, Ordering::Relaxed);
         if let Some(action) = decision.action {
             if let Some(sender) = EVENT_SENDER.get() {
                 let _ = sender.send(action);
@@ -121,53 +120,53 @@ fn classify_key_event(
     message: u32,
     virtual_key: u32,
     alt_down: bool,
-    space_held: bool,
-    alt_space_active: bool,
+    trigger_held: bool,
+    alt_trigger_active: bool,
 ) -> KeyDecision {
-    let is_space = virtual_key == VK_SPACE.0 as u32;
+    let is_trigger = virtual_key == VK_Z.0 as u32;
     let is_key_down = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
     let is_key_up = matches!(message, WM_KEYUP | WM_SYSKEYUP);
 
-    if is_space && is_key_down && alt_down {
+    if is_trigger && is_key_down && alt_down {
         return KeyDecision {
             consume: true,
-            action: (!space_held).then_some(HotkeyAction::Toggle),
-            space_held: true,
-            alt_space_active: true,
+            action: (!trigger_held).then_some(HotkeyAction::Toggle),
+            trigger_held: true,
+            alt_trigger_active: true,
         };
     }
-    if is_space && is_key_up {
+    if is_trigger && is_key_up {
         return KeyDecision {
-            consume: alt_space_active,
+            consume: alt_trigger_active,
             action: None,
-            space_held: false,
-            alt_space_active,
+            trigger_held: false,
+            alt_trigger_active,
         };
     }
-    if virtual_key == VK_MENU.0 as u32 && is_key_up && alt_space_active {
+    if virtual_key == VK_MENU.0 as u32 && is_key_up && alt_trigger_active {
         return KeyDecision {
             consume: true,
             action: None,
-            space_held,
-            alt_space_active: false,
+            trigger_held,
+            alt_trigger_active: false,
         };
     }
 
     KeyDecision {
         consume: false,
         action: None,
-        space_held,
-        alt_space_active,
+        trigger_held,
+        alt_trigger_active,
     }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum HotkeyError {
-    #[error("Alt+Space hook is already installed")]
+    #[error("Alt+Z hook is already installed")]
     AlreadyInstalled,
-    #[error("could not start Alt+Space hook thread: {0}")]
+    #[error("could not start Alt+Z hook thread: {0}")]
     ThreadStart(std::io::Error),
-    #[error("could not install Alt+Space hook: {0}")]
+    #[error("could not install Alt+Z hook: {0}")]
     HookStart(String),
 }
 
@@ -176,19 +175,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn alt_space_system_keydown_dispatches_once_and_suppresses_the_system_menu() {
-        let first = classify_key_event(WM_SYSKEYDOWN, VK_SPACE.0 as u32, true, false, false);
+    fn alt_z_system_keydown_dispatches_once_and_suppresses_the_chord() {
+        let first = classify_key_event(WM_SYSKEYDOWN, VK_Z.0 as u32, true, false, false);
         assert_eq!(first.action, Some(HotkeyAction::Toggle));
         assert!(first.consume);
-        assert!(first.space_held);
-        assert!(first.alt_space_active);
+        assert!(first.trigger_held);
+        assert!(first.alt_trigger_active);
 
         let repeat = classify_key_event(
             WM_SYSKEYDOWN,
-            VK_SPACE.0 as u32,
+            VK_Z.0 as u32,
             true,
-            first.space_held,
-            first.alt_space_active,
+            first.trigger_held,
+            first.alt_trigger_active,
         );
         assert_eq!(repeat.action, None);
         assert!(repeat.consume);
@@ -198,34 +197,34 @@ mod tests {
     fn releasing_alt_after_the_chord_is_also_suppressed() {
         let released = classify_key_event(WM_SYSKEYUP, VK_MENU.0 as u32, false, true, true);
         assert!(released.consume);
-        assert!(!released.alt_space_active);
+        assert!(!released.alt_trigger_active);
     }
 
     #[test]
     fn completing_a_chord_does_not_leave_a_system_key_event_for_the_next_toggle() {
-        let pressed = classify_key_event(WM_SYSKEYDOWN, VK_SPACE.0 as u32, true, false, false);
-        let space_released = classify_key_event(
+        let pressed = classify_key_event(WM_SYSKEYDOWN, VK_Z.0 as u32, true, false, false);
+        let trigger_released = classify_key_event(
             WM_SYSKEYUP,
-            VK_SPACE.0 as u32,
+            VK_Z.0 as u32,
             true,
-            pressed.space_held,
-            pressed.alt_space_active,
+            pressed.trigger_held,
+            pressed.alt_trigger_active,
         );
-        assert!(space_released.consume);
+        assert!(trigger_released.consume);
 
         let alt_released = classify_key_event(
             WM_SYSKEYUP,
             VK_MENU.0 as u32,
             false,
-            space_released.space_held,
-            space_released.alt_space_active,
+            trigger_released.trigger_held,
+            trigger_released.alt_trigger_active,
         );
         let next = classify_key_event(
             WM_SYSKEYDOWN,
-            VK_SPACE.0 as u32,
+            VK_Z.0 as u32,
             true,
-            alt_released.space_held,
-            alt_released.alt_space_active,
+            alt_released.trigger_held,
+            alt_released.alt_trigger_active,
         );
         assert_eq!(next.action, Some(HotkeyAction::Toggle));
     }

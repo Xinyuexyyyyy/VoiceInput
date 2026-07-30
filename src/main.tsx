@@ -110,7 +110,7 @@ function App() {
   const elapsed = new Date(Math.max(elapsedMs, 0)).toISOString().slice(14, 19);
   const hint =
     status.phase === "listening"
-      ? "Alt + Space 结束  ·  Esc 取消"
+      ? "Alt + Z 结束  ·  Esc 取消"
       : ["copied", "partial_copied"].includes(status.phase)
         ? "按 Ctrl + V 粘贴"
       : ["starting", "finalizing"].includes(status.phase)

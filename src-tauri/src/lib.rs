@@ -43,7 +43,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![session_status])
         .setup(move |app| {
             hotkey::install(session.clone())
-                .expect("VoiceInput Alt+Space keyboard hook could not be installed");
+                .expect("VoiceInput Alt+Z keyboard hook could not be installed");
             if let Some(window) = app.get_webview_window("main") {
                 overlay::prepare(&window);
             }
